@@ -24,10 +24,67 @@ VALID_CATEGORIES = [
     "сомнительный дефект, требуется валидация",
 ]
 
-def load_reviewers(reviewers_dir="reviewers"):
+DEFAULT_APPLIES_TO = ["code", "specs"]
+
+
+def parse_frontmatter(content, fallback_name):
+    """
+    Extracts name, role, and applies_to from YAML frontmatter using stdlib.
+    Defaults applies_to to ["code", "specs"] when omitted.
+    """
+    fm_match = re.match(r"\A---\s*\n(.*?)\n---", content, re.DOTALL)
+    frontmatter = fm_match.group(1) if fm_match else content
+
+    name_match = re.search(r"^name:\s*([^\n]+)", frontmatter, re.MULTILINE)
+    role_match = re.search(r"^role:\s*([^\n]+)", frontmatter, re.MULTILINE)
+    name = name_match.group(1).strip().strip('"\'') if name_match else fallback_name
+    role = role_match.group(1).strip().strip('"\'') if role_match else name
+
+    applies_to = None
+    inline_match = re.search(r"^applies_to:\s*\[([^\]]*)\]", frontmatter, re.MULTILINE)
+    if inline_match:
+        items = [x.strip().strip('"\'').lower() for x in inline_match.group(1).split(",") if x.strip()]
+        applies_to = items if items else list(DEFAULT_APPLIES_TO)
+    else:
+        block_match = re.search(r"^applies_to:\s*\n((?:\s*-\s*[^\n]+\n?)+)", frontmatter, re.MULTILINE)
+        if block_match:
+            items = [
+                re.sub(r"^\s*-\s*", "", line).strip().strip('"\'').lower()
+                for line in block_match.group(1).splitlines()
+                if line.strip()
+            ]
+            applies_to = [x for x in items if x] or list(DEFAULT_APPLIES_TO)
+        else:
+            scalar_match = re.search(r"^applies_to:\s*([^\s#\n]+)", frontmatter, re.MULTILINE)
+            if scalar_match:
+                applies_to = [scalar_match.group(1).strip().strip('"\'').lower()]
+
+    if not applies_to:
+        applies_to = list(DEFAULT_APPLIES_TO)
+
+    return name, role, applies_to
+
+
+def _matches_scope(applies_to, target_scope, specs_only=False):
+    """Returns True if a reviewer applies to the given target_scope."""
+    if specs_only and applies_to != ["specs"]:
+        return False
+    if not target_scope or target_scope == "all":
+        return True
+    requested = (
+        [s.strip().lower() for s in target_scope.split(",") if s.strip()]
+        if isinstance(target_scope, str)
+        else [str(s).strip().lower() for s in target_scope if str(s).strip()]
+    )
+    if not requested or "all" in requested:
+        return True
+    return any(scope in applies_to for scope in requested)
+
+
+def load_reviewers(reviewers_dir="reviewers", target_scope=None, specs_only=False):
     """
     Scans the reviewers directory and returns a dictionary of active reviewer files
-    excluding the final triage reviewer.
+    matching target_scope, excluding the final triage reviewer.
     """
     if not os.path.exists(reviewers_dir):
         return {}, None
@@ -49,15 +106,15 @@ def load_reviewers(reviewers_dir="reviewers"):
         else:
             with open(fpath, "r", encoding="utf-8") as f:
                 content = f.read()
-                name_match = re.search(r"^name:\s*([^\n]+)", content, re.MULTILINE)
-                role_match = re.search(r"^role:\s*([^\n]+)", content, re.MULTILINE)
-                name = name_match.group(1).strip().strip('"\'') if name_match else fname.replace(".md", "")
-                role = role_match.group(1).strip().strip('"\'') if role_match else name
+                name, role, applies_to = parse_frontmatter(content, fname.replace(".md", ""))
+                if not _matches_scope(applies_to, target_scope, specs_only=specs_only):
+                    continue
                 active_reviewers[name] = {
                     "path": fpath,
                     "filename": fname,
                     "name": name,
                     "role": role,
+                    "applies_to": applies_to,
                     "content": content
                 }
 
@@ -180,9 +237,23 @@ def format_final_report(triaged_findings):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "list":
-        active, final = load_reviewers()
+        cli_args = sys.argv[2:]
+        specs_only = "--specs-only" in cli_args
+        positional = [arg for arg in cli_args if not arg.startswith("--")]
+        target_scope = positional[0] if positional else None
+        active, final = load_reviewers(target_scope=target_scope, specs_only=specs_only)
         print(json.dumps({
-            "active_reviewers": [{ "name": r["name"], "role": r["role"], "file": r["filename"] } for r in active.values()],
+            "scope": target_scope or "all",
+            "specs_only": specs_only,
+            "active_reviewers": [
+                {
+                    "name": r["name"],
+                    "role": r["role"],
+                    "file": r["filename"],
+                    "applies_to": r["applies_to"],
+                }
+                for r in active.values()
+            ],
             "final_reviewer": final["filename"] if final else None
         }, indent=2, ensure_ascii=False))
     else:

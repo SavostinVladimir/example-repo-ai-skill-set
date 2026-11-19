@@ -1,11 +1,11 @@
 ---
 name: review
-description: Мультиагентное ревью кода и спецификаций на основе специализированных агентов из папки reviewers. Запускает суб-агентов (PostgreSQL & Codebase Reviewer, User Journey & Spec Compliance Reviewer, Critical Architecture Adversary), формирует приоритезированный отчет и запускает финального ревьювера для классификации дефектов (новый / старый / сомнительный).
+description: Мультиагентное ревью кода и спецификаций на основе специализированных агентов из папки reviewers. Запускает универсальных суб-агентов (PostgreSQL & Codebase Reviewer, User Journey & Spec Compliance Reviewer, Critical Architecture Adversary) и — только при ревью спецификаций — профильных ревьюверов спецификаций (spec-goal, spec-undetail, spec-claims, spec-coder, spec-ai-authored), формирует приоритезированный отчет и запускает финального ревьювера для классификации дефектов (новый / старый / сомнительный).
 ---
 
 # Скилл: /review (Мультиагентное ревью кода и спецификаций)
 
-Этот скилл выполняет комплексное независимое ревью кода и проектных спецификаций с помощью команды специализированных суб-агентов из директории `reviewers/`, с последующей агрегацией, ранжированием по критичности и финальным арбитражем находок.
+Этот скилл выполняет комплексное независимое ревью кода и проектных спецификаций с помощью команды специализированных суб-агентов из директории `reviewers/`, с учетом области применимости (`applies_to`), последующей агрегацией, ранжированием по критичности и финальным арбитражем находок.
 
 ---
 
@@ -24,6 +24,14 @@ description: Мультиагентное ревью кода и специфи�
  │   Reviewer   │    │  Compliance  │    │  Adversary   │
  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
         │                   │                   │
+        │     (только при наличии спецификаций) │
+        │    ┌─────────┬────┴────┬──────────┬───────────┐
+        │    ▼         ▼         ▼          ▼           ▼
+        │ ┌──────┐ ┌────────┐ ┌──────┐ ┌──────┐ ┌───────────────┐
+        │ │spec- │ │spec-   │ │spec- │ │spec- │ │spec-          │
+        │ │goal  │ │undetail│ │claims│ │coder │ │ai-authored    │
+        │ └──┬───┘ └───┬────┘ └──┬───┘ └──┬───┘ └───────┬───────┘
+        │    └─────────┴────┬────┴──────────┴───────────┘
         └───────────────────┼───────────────────┘
                             ▼
  ┌────────────────────────────────────────────────────────┐
@@ -54,22 +62,33 @@ description: Мультиагентное ревью кода и специфи�
      - Проверь активные изменения в git (staged/unstaged diff или `git diff HEAD~1`).
      - Либо проверь последние изменения в `openspec/changes/`.
      - При неоднозначности уточни у пользователя, что именно необходимо проверить.
+   - **Классификация скоупа (`code` vs `specs`):**
+     - Определи, присутствуют ли в проверяемом скоупе файлы спецификаций (`openspec/specs/**`, `openspec/changes/**`: `proposal.md`, `design.md`, `specs/**/*.md`, `tasks.md`).
+     - Если в скоупе есть только код без спецификаций (`scope = code`), ревьюверы с `applies_to: ["specs"]` (`spec-goal`, `spec-undetail`, `spec-claims`, `spec-coder`) **не запускаются**.
+     - Если в скоупе есть спецификации (`scope = specs` или комбинированный diff с изменениями спецификаций), подключаются как универсальные ревьюверы, так и ревьюверы спецификаций (передавая им для ревью **только** файлы спецификаций).
 2. **Загрузка контекстных документов:**
    - Архитектурные решения: [ADR.md](file:///Users/freemike/Projects/bootcamp-mast/ADR.md).
    - База известных ложных находок: [known-review-gaps.md](file:///Users/freemike/Projects/bootcamp-mast/known-review-gaps.md).
-   - Спецификации: файлы из `openspec/specs/` и `openspec/changes/*/specs/`.
+   - Спецификации: файлы из `openspec/specs/` и `openspec/changes/*/specs/` (а также `proposal.md`, `design.md`, `tasks.md` в проверяемом change).
 
 ---
 
 ### Шаг 2. Обнаружение ревьюверов из папки `reviewers/`
 
-1. Прочитай список доступных ревьюверов из директории `reviewers/`:
-   - [reviewers/postgresql-codebase-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/postgresql-codebase-reviewer.md)
-   - [reviewers/user-journey-spec-compliance-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/user-journey-spec-compliance-reviewer.md)
-   - [reviewers/critical-architecture-adversary.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/critical-architecture-adversary.md)
-   *(Любые дополнительные `*-reviewer.md`, кроме `final-triage-reviewer.md`, подключаются автоматически).*
-2. Для каждого найденного файла извлеки:
-   - Роль (`role`) и цели проверки.
+1. Прочитай список доступных ревьюверов из директории `reviewers/` (можно проверить через `python3 .agent/skills/review/scripts/orchestrate_review.py list [specs|code]`):
+   - **Универсальные ревьюверы (`applies_to: ["code", "specs"]` по умолчанию):**
+     - [reviewers/postgresql-codebase-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/postgresql-codebase-reviewer.md)
+     - [reviewers/user-journey-spec-compliance-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/user-journey-spec-compliance-reviewer.md)
+     - [reviewers/critical-architecture-adversary.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/critical-architecture-adversary.md)
+   - **Ревьюверы только для спецификаций (`applies_to: ["specs"]`):**
+     - [reviewers/spec-goal.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-goal.md)
+     - [reviewers/spec-undetail.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-undetail.md)
+     - [reviewers/spec-claims.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-claims.md)
+     - [reviewers/spec-coder.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-coder.md)
+     - [reviewers/spec-ai-authored.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-ai-authored.md)
+   *(Любые дополнительные `*.md` в `reviewers/`, кроме `README.md` и `final-triage-reviewer.md`, подключаются автоматически с учетом их поля `applies_to`).*
+2. Для каждого подходящего под текущий скоуп файла извлеки:
+   - Роль (`role`), область применимости (`applies_to`) и цели проверки.
    - Чек-лист проверки и специфические критерии.
    - Формат ответа с обязательными полями: `id`, `title`, `severity` (`Blocker`, `Critical`, `Major`, `Minor`, `Info`), `file`, `lines`, `description`, `impact`, `evidence`, `recommendation`.
 
@@ -77,7 +96,7 @@ description: Мультиагентное ревью кода и специфи�
 
 ### Шаг 3. Запуск суб-агентов ревью
 
-Для каждого специализированного ревьювера запусти отдельного суб-агента с помощью инструмента `invoke_subagent` (или через `run_workflow` для параллельного запуска):
+Для каждого отобранного по скоупу ревьювера запусти отдельного суб-агента с помощью инструмента `invoke_subagent` (или через `run_workflow` для параллельного запуска):
 
 1. **Суб-агент 1: PostgreSQL & Codebase Reviewer**
    - **Role**: `PostgreSQL & Codebase Reviewer`
@@ -102,6 +121,50 @@ description: Мультиагентное ревью кода и специфи�
      > **Область проверки**: [архитектурные решения, спеки, фоновые воркеры, код].  
      > **Фокус**: поиск причин, почему решения "в лоб" упадут под нагрузкой (вирусный фанаут нотификаций, исчерпание пулов коннектов, состояния гонки, дедлоки, каскадные сбои).  
      > Верни структурированный список находок.
+
+> **Важно:** Суб-агенты 4–8 ниже запускаются **только при ревью спецификаций** (когда в скоупе присутствуют файлы из `openspec/`). В качестве объекта ревью им передаются **исключительно файлы спецификаций** (`proposal.md`, `design.md`, `specs/**/*.md`, `tasks.md`); кодовая база `mastodon/` и `ADR.md` используются ими только как эталон для проверки фактов и технической реализуемости. При ревью исключительно кода эти 5 агентов не запускаются.
+
+4. **Суб-агент 4: Spec Goal & Alignment Reviewer (`spec-goal`)** *(только для спецификаций)*
+   - **Role**: `Spec Goal & Alignment Reviewer (spec-goal)`
+   - **Prompt**:
+     > Проведи ревью цели спецификации в соответствии с инструкциями из [reviewers/spec-goal.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-goal.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
+     > **Фокус**: четкость и единство цели, осмысленность и приоритетность цели в рамках проекта (`top3-proposal.md`, `ADR.md`), соответствие всех решений цели и гарантия ее достижения.  
+     > Верни структурированный список находок.
+
+5. **Суб-агент 5: Spec Abstraction & Anti-Bloat Reviewer (`spec-undetail`)** *(только для спецификаций)*
+   - **Role**: `Spec Abstraction & Anti-Bloat Reviewer (spec-undetail)`
+   - **Prompt**:
+     > Проведи проверку уровня абстракции спецификации в соответствии с инструкциями из [reviewers/spec-undetail.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-undetail.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
+     > **Фокус**: выявление лишних, избыточных и слишком низкоуровневых деталей реализации, несоблюдения границ артефактов OpenSpec и дублирования между ними.  
+     > Верни структурированный список находок.
+
+6. **Суб-агент 6: Spec Fact-Checker & Claims Verifier (`spec-claims`)** *(только для спецификаций)*
+   - **Role**: `Spec Fact-Checker & Claims Verifier (spec-claims)`
+   - **Prompt**:
+     > Проведи фактчекинг и верификацию утверждений спецификации в соответствии с инструкциями из [reviewers/spec-claims.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-claims.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
+     > **Эталон для сверки**: кодовая база `mastodon/`, `mastodon/db/schema.rb`, `ADR.md`.  
+     > **Фокус**: проверка того, что все заявления, цифры, оценки сложности, ссылки на модели/индексы и факты в спецификации являются верными, корректными и легко проверяемыми.  
+     > Верни структурированный список находок.
+
+7. **Суб-агент 7: Spec Feasibility & Codebase Compatibility Reviewer (`spec-coder`)** *(только для спецификаций)*
+   - **Role**: `Spec Feasibility & Codebase Compatibility Reviewer (spec-coder)`
+   - **Prompt**:
+     > Проведи проверку реализуемости и совместимости технических решений спецификации в соответствии с инструкциями из [reviewers/spec-coder.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-coder.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
+     > **Эталон для сверки**: текущее состояние кодовой базы `mastodon/`.  
+     > **Фокус**: реализуемость всех указанных технических решений в Rails/PostgreSQL/Sidekiq, соответствие текущей кодовой базе (классы, методы, ассоциации, схема БД) и отсутствие немедленных побочных проблем.  
+     > Верни структурированный список находок.
+
+8. **Суб-агент 8: Spec AI-Authored Antipatterns Reviewer (`spec-ai-authored`)** *(только для спецификаций)*
+   - **Role**: `Spec AI-Authored Antipatterns Reviewer (spec-ai-authored)`
+   - **Prompt**:
+     > Проведи глубокий аудит спецификации на предмет типичных антипаттернов ИИ-генерации в соответствии с инструкциями из [reviewers/spec-ai-authored.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-ai-authored.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
+     > **Фокус**: проверка 10 антипаттернов: лоскутная архитектура («Франкенштейн»), рассинхрон разделов (Spec Drift), слова-заглушки и махание руками (Handwaving), слепота к конкурентности/гонкам/дедлокам, уклон в Happy Path и игнорирование сбоев/идемпотентности, отсутствие плана раскатки/отката, искажение граничных контрактов, неучет роста данных и bloat во времени, тавтологичные тесты и вакуум наблюдаемости/рубильников.  
+     > Верни структурированный список находок с указанием антипаттерна в формате JSON/Markdown.
 
 ---
 
