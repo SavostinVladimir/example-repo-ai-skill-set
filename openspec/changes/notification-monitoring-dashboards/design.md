@@ -1,0 +1,118 @@
+## Context
+
+Подсистема уведомлений Mastodon проходит через распределенный конвейер из 7 функциональных компонентов (`Client Layer`, `API & Ingestion`, `Queue & Broker`, `Notification Engine`, `Persistence Storage`, `Real-Time Streaming`, `Outbound Push & Email Gateway`), описанных в спецификации `notification-system-components`. Принятые архитектурные решения `ADR-1`, `ADR-2` и `ADR-3` (`postgres-notification-optimizations`) переносят часть стоимости с чтения (`WITH RECURSIVE` и `unnest`-подзапросов в `Api::V2::NotificationsController`, 100-уровневого CTE в `NotifyService`) на путь записи (`UPSERT` в `notification_groups`, обновление индексируемого `most_recent_notification_id`, синхронная запись в `dm_thread_permissions`, пакетная предочистка групп при удалении статусов).
+
+При этом в кодовой базе Mastodon и контуре нагрузочного стенда (`notification-load-testing`) уже присутствуют разрозненные инструменты телеметрии:
+- **Prometheus (Ruby: Puma & Sidekiq):** гем `prometheus_exporter` (`~> 2.2`), конфигурируемый в `config/initializers/prometheus_exporter.rb`, `config/puma.rb`, `config/initializers/sidekiq.rb`, а также облегченный middleware `Mastodon::Middleware::PrometheusQueueTime` и локальный сервер `Mastodon::PrometheusExporter::LocalServer`.
+- **Prometheus (Node.js Streaming):** встроенный эндпоинт `GET /metrics` в `streaming/index.js` и `streaming/metrics.js` на базе `@prometheus-io/client`.
+- **OpenTelemetry (Tracing & Span Attributes):** конфигурация SDK и автоинструментаций (`Rack`, `Rails`, `PG`, `Redis`, `Sidekiq`, HTTP-клиенты) в `config/initializers/opentelemetry.rb`, корреляция логов `TelemetryLoggingMiddleware` (`trace_id`, `span_id`), а также прикладные спаны `MastodonOTELTracer` в `Api::V2::NotificationsController`, сервисах поиска и `ActivityPub::OpenTelemetry`.
+- **PostgreSQL и PgHero:** встроенный движок `PgHero` (`/pghero`, `Scheduler::PgheroScheduler` → `PgHero.capture_space_stats`), тегирование SQL-запросов `sidekiq_job_class` в `Mastodon::SidekiqMiddleware#setup_query_log_tags`, а также системные представления `pg_stat_statements`, `pg_statio_user_tables`, `pg_stat_user_tables`, `pg_stat_activity` и `pg_locks`.
+- **Redis-трекеры и события Rails:** `ActivityTracker` (`activity:interactions`, `activity:statuses:local`, `activity:accounts:local`, `activity:logins`), `FeatureUsageTracker` (`activity:feature_usage:follow:*`), `DeliveryFailureTracker` (`exhausted_deliveries:*` + `UnavailableDomain`), `Admin::Metrics::Dimension::SpaceUsageDimension` и подписка `ActiveSupport::Notifications` на `/rack_attack/` (`config/initializers/rack_attack_logging.rb`).
+- **Стендовая телеметрия (`k6` и Mock Gateway):** расчет `E2E WebSocket Latency`, когортные профили (`Селебрити`, `Активный читатель`, `Участник DM`, `Генератор мутаций`), утилизация CPU процессом `k6` и счетчики Mock WebPush / SMTP (`notification-load-testing`).
+
+Единая трехуровневая модель дашбордов связывает эти источники в целостный контур наблюдаемости: от симптома на пользовательском пути → к проблемному звену конвейера → к системным и прикладным метрикам конкретного компонента.
+
+## Goals / Non-Goals
+
+**Goals:**
+- Спроектировать 3 взаимоувязанных дашборда исключительно на базе уже имеющихся в проекте источников метрик, спанов, трекеров и представлений СУБД.
+- Зафиксировать стандарт артефактов дашбордов в виде декларативных моделей **Grafana Dashboard JSON (schema v10+)** в каталоге `monitoring/dashboards/`.
+- Обеспечить прямую наблюдаемость SLA пользовательских путей и верифицировать эффект и риски `ADR-1`, `ADR-2`, `ADR-3` (снижение задержки чтения у селебрити, отсутствие деградации `LocalNotificationWorker` на глубоких DM-тредах, контроль `HOT update` / MVCC bloat на `notification_groups` и отсутствие $O(N^2)$ шторма при удалении популярных статусов).
+- Учесть технические особенности сбора метрик: раздельные правила агрегации для гейджей очередей (`max`) и счетчиков задач (`sum by (class)`), многопроцессный `Puma` vs `MASTODON_PROMETHEUS_EXPORTER_LOCAL`, фактические имена метрик в `streaming/metrics.js` и мета-мониторинг доступности скраперов (`up`).
+- Жестко разделить в дашборде индивидуального компонента **системные/рантайм-метрики** и **метрики приложения** для ускорения триажа инцидентов.
+
+**Non-Goals:**
+- Внедрение новых сторонних APM-агентов или переписывание бизнес-логики доставки уведомлений.
+- Мониторинг сторонних федеративных серверов ActivityPub за пределами локальных очередей (`push`, `ingress`), спан-атрибутов `ActivityPub::OpenTelemetry` и локального трекера сбоев `DeliveryFailureTracker`.
+- Реализация клиентской RUM-телеметрии браузера в обход существующих серверных и `k6`-метрик (откат Optimistic UI отслеживается через долю 4xx/5xx ответов API и логику `k6`/клиента).
+
+## Decisions
+
+### 1. Топология сбора, стандарт артефактов и реестр источников метрик
+
+Для исключения потерь данных, конфликтов портов и математических искажений при агрегации принимаются следующие архитектурные решения:
+
+1. **Формат и размещение артефактов:**
+   - Все дашборды специфицируются и создаются в формате **Grafana Dashboard JSON (schema v10+)** и размещаются в каталоге репозитория `monitoring/dashboards/`:
+     - `monitoring/dashboards/user_journeys.json` — Дашборд пользовательских путей
+     - `monitoring/dashboards/components_overview.json` — Дашборд обзора всех компонентов
+     - `monitoring/dashboards/component_deep_dive.json` — Дашборд глубокой диагностики индивидуальных компонентов
+   - Дашборды используют стандартные переменные окружения и PromQL-запросы к общему источнику данных `DS_PROMETHEUS`.
+
+2. **Профиль экспортеров Ruby-процессов (`Puma` и `Sidekiq`):**
+   - Используется общий процесс коллектора `./bin/prometheus_exporter` (`PROMETHEUS_EXPORTER_HOST:PROMETHEUS_EXPORTER_PORT`, по умолчанию `localhost:9394`) при `MASTODON_PROMETHEUS_EXPORTER_ENABLED=true`.
+   - *Альтернатива:* Включение `MASTODON_PROMETHEUS_EXPORTER_LOCAL=true` (встроенный `Mastodon::PrometheusExporter::LocalServer`). Отклонено для `Puma` в кластерном режиме (`WEB_CONCURRENCY > 1`), поскольку каждый форкнутый воркер пытается открыть порт `9394` и падает с конфликтом адреса (`documentation/content/en/admin/config.md:742`). Режим `LOCAL=true` допустим только для одиночных процессов `Sidekiq` в контейнерах.
+   - Для полной наблюдаемости контроллеров и воркеров на стенде и в профилировании активируются `MASTODON_PROMETHEUS_EXPORTER_WEB_DETAILED_METRICS=true` (включает `PrometheusExporter::Middleware`) и `MASTODON_PROMETHEUS_EXPORTER_SIDEKIQ_DETAILED_METRICS=true` (включает `Sidekiq`, `SidekiqQueue`, `SidekiqStats` и `death_handler`). В высоконагруженном продакшене при наличии OpenTelemetry допустим переход на `Mastodon::Middleware::PrometheusQueueTime` (собирает только `queue_time` для `type: 'web'`), снижая нагрузку на коллектор.
+
+3. **Строгое разграничение правил агрегации многопроцессных метрик Sidekiq:**
+   - **Метрики очередей и глобальной статистики (Gauges):** `SidekiqQueue` (`size`, `latency`) и `SidekiqStats` (`enqueued`, `retry`, `dead`, `scheduled`) собираются из Redis каждым процессом Sidekiq. Для исключения кратного завышения значений эти метрики агрегируются строго через `max by (queue)` (для очередей) и `max(...)` (для глобальных счетчиков).
+   - **Метрики выполнения воркеров (Counters / Summaries):** `PrometheusExporter::Instrumentation::Sidekiq` инкрементирует счетчики обработанных задач, исключений и суммарного времени выполнения локально в каждом процессе воркера. Применение `max` здесь недопустимо, так как это отбросит работу других процессов. Суммарный RPS и число ошибок агрегируются строго через `sum by (job_class)`: `sum by (job_class) (rate(sidekiq_job_count[1m]))` и `sum by (job_class) (rate(sidekiq_job_error_count[1m]))`.
+
+4. **Точные имена метрик `Node.js Streaming` (`GET /metrics`):**
+   - Дашборды ссылаются на реальные имена, зарегистрированные в `streaming/metrics.js`: `connected_clients`, `connected_channels`, `redis_subscriptions`, `redis_messages_received_total`, `messages_sent_total`, `pg_pool_total_connections`, `pg_pool_idle_connections`, `pg_pool_waiting_queries` и стандартные метрики `@prometheus-io/client` (`metrics.collectDefaultMetrics()`).
+   - *Важное уточнение:* В `documentation/content/en/admin/scaling.md:45-48` приведены имена с префиксом `mastodon_streaming_*`, однако в коде `streaming/metrics.js` префикс не задается. При визуализации распределения каналов запросы группируются по лейблу: `sum by (channel) (connected_channels)`, учитывая, что код `streaming/index.js:543,1308` делает `inc(2)` для `channel="system"` на каждое клиентское подключение.
+
+5. **Мета-мониторинг жизнеспособности экспортеров:**
+   - На Дашборде 2 резервируется верхняя статусная строка доступности scrape-таргетов на основе стандартной метрики `up{job=~"puma|sidekiq|streaming|postgres"}` для немедленного выявления сбоев сборщика телеметрии и исключения ложного истолкования «нулевого трафика».
+
+6. **Примечание по StatsD:**
+   - Несмотря на упоминание `STATSD_ADDR` в `documentation/content/en/admin/config.md` и очистку `Thread.current[:statsd_socket]` в middleware (`socket_cleanup.rb`, `sidekiq_middleware.rb`), активная отправка StatsD-метрик в кодовой базе `mastodon/` отсутствует и в дашбордах не используется.
+
+---
+
+### 2. Архитектура Дашборда 1: Дашборд пользовательских путей (`user_journeys.json`)
+
+Дашборд структурирован по 4 ключевым пользовательским путям (с поддержкой фильтров по когортам: `Селебрити`, `Активный читатель`, `Участник DM`, эндпоинтам API v2 / v1 и сравнению профилей `As-Is` / `To-Be` в контуре `k6`):
+
+| Пользовательский путь | Секция / Панель дашборда | Имеющиеся источники и метрики | Целевой ориентир / Индикатор деградации |
+| :--- | :--- | :--- | :--- |
+| **1. Социальное действие и Optimistic UI** (Лайк, репост, публикация поста/DM, подписка, голосование) | • Задержка и статус-коды действий API<br>• Интенсивность пользовательских взаимодействий<br>• Откаты Optimistic UI и Rate Limits | • `PrometheusExporter::Middleware` (экшены `FavouritesController`, `StatusesController`, `AccountsController`, `VotesController`: RPS, HTTP latency, доля `4xx`/`5xx`)<br>• `Mastodon::Middleware::PrometheusQueueTime` (`queue_time`)<br>• `ActivityTracker` (`activity:interactions`, `activity:statuses:local`)<br>• `FeatureUsageTracker` (`activity:feature_usage:follow:*` по `ref`)<br>• Логи/события `rack_attack` (`:throttle`, `:blocklist`) | • API & Ingestion P99 < 50 мс (`notification-system-components`)<br>• Рост `5xx` или `429` (`rack_attack`) указывает на принудительный откат Optimistic UI у клиента |
+| **2. Чтение и скролл ленты уведомлений API v2 и API v1** (`#index`, `#unread_count`, `#show`, маркеры) | • Латентность чтения API v2 и legacy API v1 (`p50`/`p95`/`p99`) по когортам («Селебрити» vs «Обычные»)<br>• Декомпозиция времени ответа `NotificationsController#index` по этапам<br>• Кардинальность группировки и режимы `expand_accounts`<br>• Обновление курсора непрочитанного | • `PrometheusExporter::Middleware` для `Api::V2::NotificationsController` (`index`, `unread_count`, `show`), legacy `Api::V1::NotificationsController` (`index`) и `MarkersController`<br>• `k6` когортные тренды чтения (с учетом `grouped_types[]` Web-клиента и пагинации `max_id`/`min_id`)<br>• OpenTelemetry спаны `MastodonOTELTracer`: `Api::V2::NotificationsController#load_notifications`, `#load_grouped_notifications`, `#index rendering`<br>• Атрибуты спана: `app.notification_grouping.count`, `.account.count`, `.partial_account.count`, `.status.count`, `.status.unique_count`, `.expand_accounts_param` | • Цель `To-Be` на стенде: `p95 <= 20 мс` для селебрити (жесткий порог SLA: `p95 <= 500 мс`)<br>• Аномальное время в спане `#load_notifications` сигнализирует о регрессии SQL-пути (`ADR-1`); аномалия в `#load_grouped_notifications` / `#index rendering` — о проблеме агрегации/сериализации (`ADR-2`) |
+| **3. Сквозная доставка, фильтрация DM и внешние каналы** | • Сквозная задержка доставки (E2E WebSocket Latency)<br>• Время очереди и выполнения `LocalNotificationWorker` (выделенно для DM)<br>• Поток доставки в WebSocket, WebPush и адаптивное подавление Email<br>• Разморозка отфильтрованных запросов (`UnfilterNotificationsWorker`) | • `k6` метрика `E2E WebSocket Latency` (`ws_received - http_post_sent`)<br>• `PrometheusExporter::Instrumentation::Sidekiq` (время выполнения и ожидания `LocalNotificationWorker`, `Web::PushNotificationWorker`, `ActionMailer::MailDeliveryJob`) через `sum by (job_class)`<br>• OpenTelemetry `PG` / `Sidekiq` спаны (`span_naming: :job_class`) и `sidekiq_job_class` в логах БД<br>• `streaming/metrics.js`: `messages_sent_total{type}`, `redis_messages_received_total`<br>• Redis-ключи `subscribed:timeline:{id}:notifications`, `notification_unfilter_jobs:{id}`, счетчики Mock WebPush/SMTP и `DeliveryFailureTracker` (`exhausted_deliveries:*`) | • Streaming delivery < 200 мс (SLA стенда E2E WS `<= 2 000 мс`)<br>• Выравнивание хвостов `LocalNotificationWorker` при проверке глубоких DM-тредов подтверждает эффект `dm_thread_permissions` (`ADR-3`)<br>• Сбои `Web::PushNotificationWorker` не должны задерживать очередь `default` |
+| **4. Мутации, отмена реакций и удаление вирусных постов** | • Латентность и ошибки `unfavourite`, `PUT /statuses/:id`, `clear`, `dismiss`, `DELETE /statuses/:id`<br>• Влияние массового удаления на БД и очереди | • `PrometheusExporter::Middleware` по мутационным эндпоинтам<br>• OpenTelemetry-спаны `LocalNotificationWorker` (ветка замены `update`), `RemoveStatusService`, `BatchedRemoveStatusService`, `SuspendAccountService`<br>• `pg_stat_statements` и `pg_locks` во время фазы удаления | • Отсутствие `500`-х ошибок, длительных row-lock очередей и пика длительности транзакций ($O(N^2)$ шторма) при удалении постов с 25k–50k реакциями (`ADR-2`) |
+
+---
+
+### 3. Архитектура Дашборда 2: Дашборд обзора всех компонентов системы (`components_overview.json`)
+
+Сводный экран верхнего уровня строится по принципу **RED (Rate, Errors, Duration)** для сервисов обработки запросов и **USE (Utilization, Saturation, Errors)** для ресурсов/очередей, предваряемый статусной строкой мета-мониторинга:
+
+1. **Мета-мониторинг доступности экспортеров:**
+   - Статусы доступности таргетов `up{job="puma"}`, `up{job="sidekiq"}`, `up{job="streaming"}`, `up{job="postgres"}`.
+2. **API & Ingestion (`Puma`):**
+   - *Rate / Duration / Errors:* общий HTTP RPS, `p50`/`p95`/`p99` времени ответа, доля `5xx`/`4xx` (`PrometheusExporter::Middleware`), время ожидания в очереди перед Rails (`Mastodon::Middleware::PrometheusQueueTime` / `queue_time`).
+   - *Saturation:* занятость потоков Puma (`PrometheusExporter::Instrumentation::Puma`: running/backlog/pool capacity) и загрузка пула соединений ActiveRecord (`type="puma"`).
+3. **Async Queue & Broker (`Sidekiq Queues` & `Redis`):**
+   - *Saturation:* глубина и латентность по приоритетным очередям (`default`, `push`, `ingress`, `mailers`, `pull`, `scheduler`, `fasp`) через `max by (queue)` по данным `SidekiqQueue` и глобальным счетчикам `SidekiqStats` (enqueued, retry, dead, scheduled).
+   - *Broker Footprint:* объем памяти Redis (`Admin::Metrics::Dimension::StoreHelper` → `redis_info['used_memory']`, `SpaceUsageDimension`), частота Pub/Sub-сообщений (`redis_messages_received_total` в `streaming`).
+4. **Notification Engine (`Sidekiq Workers`):**
+   - *Rate / Duration / Errors:* суммарная скорость обработки `sum by (job_class) (rate(sidekiq_job_count[1m]))` и длительность (`p50`/`p95`/`p99`) ключевых воркеров (`LocalNotificationWorker`, `UnfilterNotificationsWorker`, `ThreadResolveWorker`, `RemoveStatusService`), частота исключений `sum by (job_class) (rate(sidekiq_job_error_count[1m]))` и попаданий в Dead set (`Sidekiq.death_handler`).
+   - *Saturation:* доля занятых потоков воркеров (`SidekiqProcess` busy/concurrency) и загрузка пула БД (`ActiveRecord` с `type="sidekiq"`).
+5. **Persistence Storage (`PostgreSQL` & `PgHero`):**
+   - *Utilization / Saturation:* общее время и среднее время топ-запросов из `pg_stat_statements`, доля попаданий в буферный кэш (`shared_blks_hit / NULLIF(shared_blks_hit + shared_blks_read, 0)`), активные подключения к БД (сравнение суммы пулов Puma + Sidekiq + Streaming `pg_pool_total_connections` с `max_connections`), ожидания блокировок (`pg_locks`), состояние `n_dead_tup` и `PgHero.capture_space_stats`.
+6. **Real-Time Streaming (`Node.js`):**
+   - *Rate / Utilization / Saturation:* число активных клиентов (`connected_clients{type="websocket"|"eventsource"}`), активных каналов (`sum by (channel) (connected_channels)`), подписок Redis (`redis_subscriptions`), входящих Pub/Sub-событий (`redis_messages_received_total`), исходящих сообщений (`messages_sent_total{type}`) и очередь ожидания в PG-пуле (`pg_pool_waiting_queries`).
+7. **Outbound Push & Email Gateway (`push` / `mailers`):**
+   - *Rate / Errors:* пропускная способность `Web::PushNotificationWorker` (`queue: 'push'`) и `ActionMailer::MailDeliveryJob` (`queue: 'mailers'`), ретраи/смерти задач, динамика проблемных доменов по `DeliveryFailureTracker` (`exhausted_deliveries:*`), а в контуре стенда — счетчики Mock WebPush (201) и Mock SMTP.
+8. **Валидатор нагрузки (`k6` — только для тестового стенда):**
+   - *Health:* утилизация CPU процессом `k6` и `dropped_iterations` для исключения эффекта наблюдателя.
+
+---
+
+### 4. Архитектура Дашборда 3: Дашборд индивидуального компонента (`component_deep_dive.json`)
+
+Реализуется как параметризованное представление Grafana с переключением переменной `$component` (`puma`, `sidekiq`, `streaming`, `postgres`), где верхняя половина экрана посвящена **Системным и рантайм-метрикам (System / Runtime)**, а нижняя — **Метрикам приложения (Application / Business Logic)**:
+
+| Компонент | Блок А: Системные и рантайм-метрики (System) | Блок Б: Метрики приложения (Application) |
+| :--- | :--- | :--- |
+| **1. Puma Web Server** (`type="puma"`) | • RSS и heap-память процессов (`Instrumentation::Process`: `rss`, `heap_live_slots`, `heap_free_slots`)<br>• Сборка мусора Ruby (`major_gc_count`, `minor_gc_count`, `gc_time`)<br>• Потоки Puma и очередь сокета (`Instrumentation::Puma`: `running_threads`, `backlog`, `pool_capacity`, `max_threads`)<br>• Пул соединений PostgreSQL (`Instrumentation::ActiveRecord{type="puma"}`: busy/dead/waiting/size) | • Время ожидания в очереди перед приложением (`PrometheusQueueTime`: `queue_time`)<br>• Распределение RPS, статусов (`2xx`/`4xx`/`5xx`) и latency по контроллерам/экшенам (`NotificationsController#index` v2/v1, `#unread_count`, `#show`, `FavouritesController`, `StatusesController`)<br>• Декомпозиция спанов OpenTelemetry (`#load_notifications`, `#load_grouped_notifications`, `#index rendering`) и атрибутов `app.notification_grouping.*`<br>• Срабатывания `rack_attack` (`:throttle`, `:blocklist`) |
+| **2. Sidekiq Engine** (`type="sidekiq"`) | • RSS, объекты кучи Ruby и паузы GC (`Instrumentation::Process{type="sidekiq"}`)<br>• Утилизация воркер-потоков (`Instrumentation::SidekiqProcess`: `busy`, `concurrency`)<br>• Пул соединений PostgreSQL (`Instrumentation::ActiveRecord{type="sidekiq"}`) и возможные таймауты ожидания соединения | • Глубина, возраст и задержка по каждой очереди (`SidekiqQueue` с агрегацией `max by (queue)` для `default`, `push`, `ingress`, `mailers`, `pull`, `scheduler`, `fasp`)<br>• Глобальное состояние (`SidekiqStats`: `processed`, `failed`, `enqueued`, `scheduled`, `retry`, `dead`) через `max`<br>• Пер-воркерная статистика (`Instrumentation::Sidekiq` + OTEL `span_naming: :job_class`): RPS через `sum by (job_class) (rate(...))`, `p50`/`p95`/`p99` длительности и ошибки через `sum by (job_class)` для `LocalNotificationWorker`, `UnfilterNotificationsWorker`, `ThreadResolveWorker`, `Web::PushNotificationWorker`, `NotificationMailer`, `RemoveStatusService` |
+| **3. Node.js Streaming** (`GET /metrics`) | • Стандартные метрики `@prometheus-io/client` (`metrics.collectDefaultMetrics()`): Node.js Event Loop Lag, использование V8 heap/external memory, RSS, CPU процесса, активные хэндлы и файловые дескрипторы (сокеты клиентов)<br>• Внутренний пул PostgreSQL (`pg_pool_total_connections`, `pg_pool_idle_connections`, `pg_pool_waiting_queries`) | • Подключенные клиенты по транспорту (`connected_clients{type="websocket" \| "eventsource"}`)<br>• Подписки на каналы (`sum by (channel) (connected_channels)` для `user`, `user:notification`, `public`, `direct`, `system` с учетом внутренней поправки `inc(2)` для `system`)<br>• Поток Pub/Sub: `redis_subscriptions`, скорость приема `rate(redis_messages_received_total)` и отправки клиентам `rate(messages_sent_total{type})` (выявление отставания доставки от приема) |
+| **4. PostgreSQL & PgHero** (`pg_stat_*`, `PgHero`) | • Утилизация буферного кэша (`shared_blks_hit / NULLIF(shared_blks_hit + shared_blks_read, 0)` в `pg_statio_user_tables`) — ключевой маркер вымывания 4 ГБ пула в `As-Is`<br>• Ожидания блокировок (`pg_locks` / `pg_stat_activity` `wait_event_type = 'Lock'`)<br>• MVCC bloat и эффективность `fillfactor = 70`: `n_live_tup`, `n_dead_tup`, `autovacuum_count` в `pg_stat_user_tables`<br>• Дисковый объем БД и таблиц (`PgHero.capture_space_stats` / `SpaceUsageDimension`) | • Топ запросов из `pg_stat_statements` (`total_exec_time`, `mean_exec_time`, `calls`) с фильтрацией по тегу `sidekiq_job_class` (`Mastodon::SidekiqMiddleware`) и эндпоинтам уведомлений<br>• Безопасный расчет доли `HOT update`: `n_tup_hot_upd / NULLIF(n_tup_upd, 0)` (или PromQL `n_tup_hot_upd / clamp_min(n_tup_upd, 1)`) и `idx_scan` vs `seq_scan` для целевых таблиц `notifications`, `notification_groups`, `dm_thread_permissions`, `accounts`<br>• Длительность критических операций `ADR-1..3`: `UPSERT` в `notification_groups`, запросы пагинации, пересчеты при `RemoveStatusService` / `clear` и этап Backfill |
+
+## Risks / Trade-offs
+
+- **[Накладные расходы детальных метрик в продакшене]** → Включение `MASTODON_PROMETHEUS_EXPORTER_WEB_DETAILED_METRICS=true`, `MASTODON_PROMETHEUS_EXPORTER_SIDEKIQ_DETAILED_METRICS=true` и детальной инструментации `OpenTelemetry::Instrumentation::PG`/`Redis` увеличивает CPU и объем трафика телеметрии. **Mitigation:** Использовать полную детализацию на нагрузочном стенде и при профилировании, а в продакшене оставлять `PrometheusQueueTime` и включать head-based семплирование трассировок OpenTelemetry.
+- **[Задвоение или искажение метрик Sidekiq при масштабировании процессов]** → Ошибочное суммирование метрик очередей дает кратное завышение глубины, а ошибочный `max` для счетчиков задач занижает пропускную способность. **Mitigation:** В спецификации дашбордов строго закреплено разделение: `max by (queue)` / `max` для гейджей очередей и глобальной статистики; `sum by (job_class)` для счетчиков выполненных задач и ошибок.
+- **[Расхождение имен метрик стриминга между документацией и кодом]** → Документация (`scaling.md`) упоминает префикс `mastodon_streaming_`, тогда как `streaming/metrics.js` экспортирует имена без префикса. **Mitigation:** Опираться в запросах дашбордов на фактические имена из `streaming/metrics.js` либо явно стандартизировать релейблинг в конфигурации сборщика.
+- **[Отсутствие гранулярных метрик причин отбрасывания уведомлений (`DropCondition` / `FilterCondition`)]** → Текущий код `NotifyService` не экспортирует отдельные счетчики Prometheus по веткам `drop?` / `filter?` / `email_needed?`. **Mitigation:** Для базовой версии дашбордов использовать косвенные индикаторы (соотношение запусков `LocalNotificationWorker` к отправленным `messages_sent_total`, `Web::PushNotificationWorker` и `NotificationMailer`, а также когортные счетчики стенда `k6`), зафиксировав добавление явных прикладных счетчиков как опциональное расширение в будущем.
