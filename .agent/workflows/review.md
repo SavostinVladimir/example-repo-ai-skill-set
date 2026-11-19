@@ -16,6 +16,7 @@ description: Мультиагентное ревью кода и специфи�
      - `PostgreSQL & Codebase Reviewer` (`reviewers/postgresql-codebase-reviewer.md`)
      - `User Journey & Spec Compliance Reviewer` (`reviewers/user-journey-spec-compliance-reviewer.md`)
      - `Critical Architecture Adversary (Red Team)` (`reviewers/critical-architecture-adversary.md`)
+     - `Test Coverage & Testability Reviewer` (`reviewers/test-coverage-testability-reviewer.md`)
    - *Ревьюверы спецификаций (запускаются **только** при наличии спецификаций в скоупе)*:
      - `Spec Goal & Alignment Reviewer` (`reviewers/spec-goal.md`)
      - `Spec Abstraction & Anti-Bloat Reviewer` (`reviewers/spec-undetail.md`)
@@ -23,6 +24,12 @@ description: Мультиагентное ревью кода и специфи�
      - `Spec Feasibility & Codebase Compatibility Reviewer` (`reviewers/spec-coder.md`)
      - `Spec AI-Authored Antipatterns Reviewer` (`reviewers/spec-ai-authored.md`)
      - `Task Decomposition & Verifiability Reviewer` (`reviewers/spec-tasks.md`)
+   - *Профильные ревьюверы кода (запускаются при наличии кода в скоупе)*:
+     - `Code Readability Reviewer` (`reviewers/code-readability.md`)
+     - `Code Simplicity Reviewer` (`reviewers/code-simplicity.md`)
+     - `Code Style & Structure Reviewer` (`reviewers/code-style.md`)
+     - `Code Overengineering Protection Reviewer` (`reviewers/code-overengineering-protection.md`)
+     - `Code Relevance & Scope Reviewer` (`reviewers/code-relevance.md`)
 3. **Агрегация и приоритезация**: ранжирует все находки от Blocker до Info.
 4. **Финальный триаж**: запускает `Final Reviewer & Defect Triage Arbiter` (`reviewers/final-triage-reviewer.md`) для классификации каждой проблемы:
    - 🔴 **Реальный новый дефект**
