@@ -1,6 +1,6 @@
 ---
 name: review
-description: Мультиагентное ревью кода и спецификаций на основе специализированных агентов из папки reviewers. Запускает универсальных суб-агентов (PostgreSQL & Codebase Reviewer, User Journey & Spec Compliance Reviewer, Critical Architecture Adversary) и — только при ревью спецификаций — профильных ревьюверов спецификаций (spec-goal, spec-undetail, spec-claims, spec-coder, spec-ai-authored), формирует приоритезированный отчет и запускает финального ревьювера для классификации дефектов (новый / старый / сомнительный).
+description: Мультиагентное ревью кода и спецификаций на основе специализированных агентов из папки reviewers. Запускает универсальных суб-агентов (PostgreSQL & Codebase Reviewer, User Journey & Spec Compliance Reviewer, Critical Architecture Adversary) и — только при ревью спецификаций — профильных ревьюверов спецификаций (spec-goal, spec-undetail, spec-claims, spec-coder, spec-ai-authored, spec-tasks), формирует приоритезированный отчет и запускает финального ревьювера для классификации дефектов (новый / старый / сомнительный).
 ---
 
 # Скилл: /review (Мультиагентное ревью кода и спецификаций)
@@ -86,6 +86,7 @@ description: Мультиагентное ревью кода и специфи�
      - [reviewers/spec-claims.md](reviewers/spec-claims.md)
      - [reviewers/spec-coder.md](reviewers/spec-coder.md)
      - [reviewers/spec-ai-authored.md](reviewers/spec-ai-authored.md)
+     - [reviewers/spec-tasks.md](reviewers/spec-tasks.md)
    *(Любые дополнительные `*.md` в `reviewers/`, кроме `README.md` и `final-triage-reviewer.md`, подключаются автоматически с учетом их поля `applies_to`).*
 2. Для каждого подходящего под текущий скоуп файла извлеки:
    - Роль (`role`), область применимости (`applies_to`) и цели проверки.
@@ -167,6 +168,14 @@ description: Мультиагентное ревью кода и специфи�
      > Верни структурированный список находок с указанием антипаттерна в формате JSON/Markdown.
 
 ---
+
+9. **Суб-агент 9: Task Decomposition & Verifiability Reviewer (`spec-tasks`)** *(только для спецификаций)*
+   - **Role**: `Task Decomposition & Verifiability Reviewer (spec-tasks)`
+   - **Prompt**:
+     > Проведи ревью декомпозиции и верифицируемости задач в соответствии с инструкциями из [reviewers/spec-tasks.md](reviewers/spec-tasks.md).  
+     > **Область проверки (только спецификации)**: [список файлов OpenSpec: tasks.md в связке с proposal.md, design.md, specs/**/*.md].  
+     > **Фокус**: четкость и исполняемость (точные файлы, методы, отсутствие handwaving), воспроизводимый Definition of Done (команды тестов, бинарные критерии) и независимость/параллелизуемость задач (DAG, изоляция файлов для предотвращения конфликтов в worktree).  
+     > Верни структурированный список находок.
 
 ### Шаг 4. Агрегация и формирование приоритезированного отчета
 

@@ -22,6 +22,7 @@ description: Мультиагентное ревью кода и специфи�
      - `Spec Fact-Checker & Claims Verifier` (`reviewers/spec-claims.md`)
      - `Spec Feasibility & Codebase Compatibility Reviewer` (`reviewers/spec-coder.md`)
      - `Spec AI-Authored Antipatterns Reviewer` (`reviewers/spec-ai-authored.md`)
+     - `Task Decomposition & Verifiability Reviewer` (`reviewers/spec-tasks.md`)
 3. **Агрегация и приоритезация**: ранжирует все находки от Blocker до Info.
 4. **Финальный триаж**: запускает `Final Reviewer & Defect Triage Arbiter` (`reviewers/final-triage-reviewer.md`) для классификации каждой проблемы:
    - 🔴 **Реальный новый дефект**
