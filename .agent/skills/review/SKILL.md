@@ -67,8 +67,8 @@ description: Мультиагентное ревью кода и специфи�
      - Если в скоупе есть только код без спецификаций (`scope = code`), ревьюверы с `applies_to: ["specs"]` (`spec-goal`, `spec-undetail`, `spec-claims`, `spec-coder`) **не запускаются**.
      - Если в скоупе есть спецификации (`scope = specs` или комбинированный diff с изменениями спецификаций), подключаются как универсальные ревьюверы, так и ревьюверы спецификаций (передавая им для ревью **только** файлы спецификаций).
 2. **Загрузка контекстных документов:**
-   - Архитектурные решения: [ADR.md](file:///Users/freemike/Projects/bootcamp-mast/ADR.md).
-   - База известных ложных находок: [known-review-gaps.md](file:///Users/freemike/Projects/bootcamp-mast/known-review-gaps.md).
+   - Архитектурные решения: [ADR.md](ADR.md).
+   - База известных ложных находок: [known-review-gaps.md](known-review-gaps.md).
    - Спецификации: файлы из `openspec/specs/` и `openspec/changes/*/specs/` (а также `proposal.md`, `design.md`, `tasks.md` в проверяемом change).
 
 ---
@@ -77,15 +77,15 @@ description: Мультиагентное ревью кода и специфи�
 
 1. Прочитай список доступных ревьюверов из директории `reviewers/` (можно проверить через `python3 .agent/skills/review/scripts/orchestrate_review.py list [specs|code]`):
    - **Универсальные ревьюверы (`applies_to: ["code", "specs"]` по умолчанию):**
-     - [reviewers/postgresql-codebase-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/postgresql-codebase-reviewer.md)
-     - [reviewers/user-journey-spec-compliance-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/user-journey-spec-compliance-reviewer.md)
-     - [reviewers/critical-architecture-adversary.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/critical-architecture-adversary.md)
+     - [reviewers/postgresql-codebase-reviewer.md](reviewers/postgresql-codebase-reviewer.md)
+     - [reviewers/user-journey-spec-compliance-reviewer.md](reviewers/user-journey-spec-compliance-reviewer.md)
+     - [reviewers/critical-architecture-adversary.md](reviewers/critical-architecture-adversary.md)
    - **Ревьюверы только для спецификаций (`applies_to: ["specs"]`):**
-     - [reviewers/spec-goal.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-goal.md)
-     - [reviewers/spec-undetail.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-undetail.md)
-     - [reviewers/spec-claims.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-claims.md)
-     - [reviewers/spec-coder.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-coder.md)
-     - [reviewers/spec-ai-authored.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-ai-authored.md)
+     - [reviewers/spec-goal.md](reviewers/spec-goal.md)
+     - [reviewers/spec-undetail.md](reviewers/spec-undetail.md)
+     - [reviewers/spec-claims.md](reviewers/spec-claims.md)
+     - [reviewers/spec-coder.md](reviewers/spec-coder.md)
+     - [reviewers/spec-ai-authored.md](reviewers/spec-ai-authored.md)
    *(Любые дополнительные `*.md` в `reviewers/`, кроме `README.md` и `final-triage-reviewer.md`, подключаются автоматически с учетом их поля `applies_to`).*
 2. Для каждого подходящего под текущий скоуп файла извлеки:
    - Роль (`role`), область применимости (`applies_to`) и цели проверки.
@@ -101,7 +101,7 @@ description: Мультиагентное ревью кода и специфи�
 1. **Суб-агент 1: PostgreSQL & Codebase Reviewer**
    - **Role**: `PostgreSQL & Codebase Reviewer`
    - **Prompt**:
-     > Проведи ревью кода и изменений базы данных в соответствии с инструкциями из [reviewers/postgresql-codebase-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/postgresql-codebase-reviewer.md).  
+     > Проведи ревью кода и изменений базы данных в соответствии с инструкциями из [reviewers/postgresql-codebase-reviewer.md](reviewers/postgresql-codebase-reviewer.md).  
      > **Область проверки**: [список файлов/diff].  
      > **Фокус**: функциональная корректность, N+1 запросы, индексы, блокировки транзакций, обработка ошибок, идиоматичность реализации.  
      > Верни структурированный список находок в формате JSON/Markdown с указанием точных строк и фрагментов кода.
@@ -109,7 +109,7 @@ description: Мультиагентное ревью кода и специфи�
 2. **Суб-агент 2: User Journey & Spec Compliance Reviewer**
    - **Role**: `User Journey & Spec Compliance Reviewer`
    - **Prompt**:
-     > Проведи сверку со спецификациями и пользовательскими сценариями в соответствии с инструкциями из [reviewers/user-journey-spec-compliance-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/user-journey-spec-compliance-reviewer.md).  
+     > Проведи сверку со спецификациями и пользовательскими сценариями в соответствии с инструкциями из [reviewers/user-journey-spec-compliance-reviewer.md](reviewers/user-journey-spec-compliance-reviewer.md).  
      > **Область проверки**: [спецификации OpenSpec, ADR.md, контроллеры/сериализаторы].  
      > **Фокус**: соответствие OpenSpec и ADR, целостность пользовательских сценариев нотификаций, клиентские регрессии (обратная совместимость API, формат JSON, заголовки Link).  
      > Верни структурированный список находок.
@@ -117,7 +117,7 @@ description: Мультиагентное ревью кода и специфи�
 3. **Суб-агент 3: Critical Architecture Adversary (Red Team)**
    - **Role**: `Critical Architecture Adversary`
    - **Prompt**:
-     > Проведи враждебный архитектурный стресс-тест в соответствии с инструкциями из [reviewers/critical-architecture-adversary.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/critical-architecture-adversary.md).  
+     > Проведи враждебный архитектурный стресс-тест в соответствии с инструкциями из [reviewers/critical-architecture-adversary.md](reviewers/critical-architecture-adversary.md).  
      > **Область проверки**: [архитектурные решения, спеки, фоновые воркеры, код].  
      > **Фокус**: поиск причин, почему решения "в лоб" упадут под нагрузкой (вирусный фанаут нотификаций, исчерпание пулов коннектов, состояния гонки, дедлоки, каскадные сбои).  
      > Верни структурированный список находок.
@@ -127,7 +127,7 @@ description: Мультиагентное ревью кода и специфи�
 4. **Суб-агент 4: Spec Goal & Alignment Reviewer (`spec-goal`)** *(только для спецификаций)*
    - **Role**: `Spec Goal & Alignment Reviewer (spec-goal)`
    - **Prompt**:
-     > Проведи ревью цели спецификации в соответствии с инструкциями из [reviewers/spec-goal.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-goal.md).  
+     > Проведи ревью цели спецификации в соответствии с инструкциями из [reviewers/spec-goal.md](reviewers/spec-goal.md).  
      > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
      > **Фокус**: четкость и единство цели, осмысленность и приоритетность цели в рамках проекта (`top3-proposal.md`, `ADR.md`), соответствие всех решений цели и гарантия ее достижения.  
      > Верни структурированный список находок.
@@ -135,7 +135,7 @@ description: Мультиагентное ревью кода и специфи�
 5. **Суб-агент 5: Spec Abstraction & Anti-Bloat Reviewer (`spec-undetail`)** *(только для спецификаций)*
    - **Role**: `Spec Abstraction & Anti-Bloat Reviewer (spec-undetail)`
    - **Prompt**:
-     > Проведи проверку уровня абстракции спецификации в соответствии с инструкциями из [reviewers/spec-undetail.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-undetail.md).  
+     > Проведи проверку уровня абстракции спецификации в соответствии с инструкциями из [reviewers/spec-undetail.md](reviewers/spec-undetail.md).  
      > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
      > **Фокус**: выявление лишних, избыточных и слишком низкоуровневых деталей реализации, несоблюдения границ артефактов OpenSpec и дублирования между ними.  
      > Верни структурированный список находок.
@@ -143,7 +143,7 @@ description: Мультиагентное ревью кода и специфи�
 6. **Суб-агент 6: Spec Fact-Checker & Claims Verifier (`spec-claims`)** *(только для спецификаций)*
    - **Role**: `Spec Fact-Checker & Claims Verifier (spec-claims)`
    - **Prompt**:
-     > Проведи фактчекинг и верификацию утверждений спецификации в соответствии с инструкциями из [reviewers/spec-claims.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-claims.md).  
+     > Проведи фактчекинг и верификацию утверждений спецификации в соответствии с инструкциями из [reviewers/spec-claims.md](reviewers/spec-claims.md).  
      > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
      > **Эталон для сверки**: кодовая база `mastodon/`, `mastodon/db/schema.rb`, `ADR.md`.  
      > **Фокус**: проверка того, что все заявления, цифры, оценки сложности, ссылки на модели/индексы и факты в спецификации являются верными, корректными и легко проверяемыми.  
@@ -152,7 +152,7 @@ description: Мультиагентное ревью кода и специфи�
 7. **Суб-агент 7: Spec Feasibility & Codebase Compatibility Reviewer (`spec-coder`)** *(только для спецификаций)*
    - **Role**: `Spec Feasibility & Codebase Compatibility Reviewer (spec-coder)`
    - **Prompt**:
-     > Проведи проверку реализуемости и совместимости технических решений спецификации в соответствии с инструкциями из [reviewers/spec-coder.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-coder.md).  
+     > Проведи проверку реализуемости и совместимости технических решений спецификации в соответствии с инструкциями из [reviewers/spec-coder.md](reviewers/spec-coder.md).  
      > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
      > **Эталон для сверки**: текущее состояние кодовой базы `mastodon/`.  
      > **Фокус**: реализуемость всех указанных технических решений в Rails/PostgreSQL/Sidekiq, соответствие текущей кодовой базе (классы, методы, ассоциации, схема БД) и отсутствие немедленных побочных проблем.  
@@ -161,7 +161,7 @@ description: Мультиагентное ревью кода и специфи�
 8. **Суб-агент 8: Spec AI-Authored Antipatterns Reviewer (`spec-ai-authored`)** *(только для спецификаций)*
    - **Role**: `Spec AI-Authored Antipatterns Reviewer (spec-ai-authored)`
    - **Prompt**:
-     > Проведи глубокий аудит спецификации на предмет типичных антипаттернов ИИ-генерации в соответствии с инструкциями из [reviewers/spec-ai-authored.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/spec-ai-authored.md).  
+     > Проведи глубокий аудит спецификации на предмет типичных антипаттернов ИИ-генерации в соответствии с инструкциями из [reviewers/spec-ai-authored.md](reviewers/spec-ai-authored.md).  
      > **Область проверки (только спецификации)**: [список файлов OpenSpec: proposal.md, design.md, specs/**/*.md, tasks.md].  
      > **Фокус**: проверка 10 антипаттернов: лоскутная архитектура («Франкенштейн»), рассинхрон разделов (Spec Drift), слова-заглушки и махание руками (Handwaving), слепота к конкурентности/гонкам/дедлокам, уклон в Happy Path и игнорирование сбоев/идемпотентности, отсутствие плана раскатки/отката, искажение граничных контрактов, неучет роста данных и bloat во времени, тавтологичные тесты и вакуум наблюдаемости/рубильников.  
      > Верни структурированный список находок с указанием антипаттерна в формате JSON/Markdown.
@@ -184,12 +184,12 @@ description: Мультиагентное ревью кода и специфи�
 
 ### Шаг 5. Запуск финального ревьювера для классификации дефектов
 
-Прочитай инструкции из [reviewers/final-triage-reviewer.md](file:///Users/freemike/Projects/bootcamp-mast/reviewers/final-triage-reviewer.md) и запусти суб-агента `Final Reviewer & Defect Triage Arbiter`.
+Прочитай инструкции из [reviewers/final-triage-reviewer.md](reviewers/final-triage-reviewer.md) и запусти суб-агента `Final Reviewer & Defect Triage Arbiter`.
 
 **Промпт финального ревьювера включает:**
 - Полный сводный отчет находок из Шага 4.
 - Данные `git diff` и историю изменений (`git blame` / даты коммитов).
-- Ссылку на базу известных ложных находок: [known-review-gaps.md](file:///Users/freemike/Projects/bootcamp-mast/known-review-gaps.md).
+- Ссылку на базу известных ложных находок: [known-review-gaps.md](known-review-gaps.md).
 - **Строгое требование**: Каждая находка должна быть отнесена к одной из трех категорий:
   1. 🔴 **Реальный новый дефект**: привнесен непосредственно проверяемыми изменениями в коде/спеке.
   2. 🟡 **уже существовавший старый дефект**: присутствовал в кодовой базе до текущих изменений (подтверждено git blame/историей).
